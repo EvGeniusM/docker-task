@@ -1,13 +1,24 @@
 import os
 import socket
 
+import psycopg
+import redis
 from flask import Flask, request
 
 app = Flask(__name__)
 
 VERSION = "1.0"
-DATA_DIR = os.environ.get("DATA_DIR", "data")
-NOTE_FILE = os.path.join(DATA_DIR, "note.txt")
+DATABASE_URL = os.environ["DATABASE_URL"]
+cache = redis.Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=2)
+
+
+def get_conn():
+    conn = psycopg.connect(DATABASE_URL)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notes (id INT PRIMARY KEY, text TEXT NOT NULL)"
+    )
+    conn.commit()
+    return conn
 
 
 @app.get("/")
@@ -17,25 +28,31 @@ def index():
 
 @app.get("/health")
 def health():
-    return "Finally ok again\n"
+    return "ok\n"
 
 
-@app.get("/write")
-def write():
+@app.get("/db/write")
+def db_write():
     text = request.args.get("text", "hello")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(NOTE_FILE, "w", encoding="utf-8") as f:
-        f.write(text)
-    return f"Saved to {NOTE_FILE}: {text}\n"
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, text) VALUES (1, %s) "
+            "ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text",
+            (text,),
+        )
+    return f"Saved to db: {text}\n"
 
 
-@app.get("/read")
-def read():
-    if not os.path.exists(NOTE_FILE):
-        return "no note yet\n", 404
-    with open(NOTE_FILE, encoding="utf-8") as f:
-        return f"{f.read()} (Read by {socket.gethostname()})\n"
+@app.get("/db/read")
+def db_read():
+    with get_conn() as conn:
+        row = conn.execute("SELECT text FROM notes WHERE id = 1").fetchone()
+    if row is None:
+        return "no note in db yet\n", 404
+    return f"{row[0]} (Read by {socket.gethostname()})\n"
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+@app.get("/hits")
+def hits():
+    n = cache.incr("hits")
+    return f"hits={n} (Read by {socket.gethostname()})\n"
